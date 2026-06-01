@@ -243,7 +243,7 @@ def _maybe_sync(gpg_store):
         pass
 
 def _git_commit(gpg_store, message):
-    """Stage all changes and commit. Silent no-op if store is not a git repo or git is absent."""
+    """Stage all changes, commit, and push if a remote is configured."""
     if not _is_git_repo(gpg_store):
         return
     try:
@@ -252,6 +252,19 @@ def _git_commit(gpg_store, message):
         result = subprocess.run(["git", "commit", "-m", message], cwd=gpg_store)
         if result.returncode not in (0, 1):
             print("Warning: git commit failed.", file=sys.stderr)
+            return
+        if result.returncode == 1:
+            return  # nothing to commit
+        r = subprocess.run(["git", "remote"], cwd=gpg_store,
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        if not r.stdout.strip():
+            return  # no remote configured
+        push = subprocess.run(["git", "push"], cwd=gpg_store,
+                              capture_output=True, text=True)
+        if push.returncode == 0:
+            print("[pushed to remote]", file=sys.stderr)
+        else:
+            print("Warning: git push failed — run 'gopass sync' to retry.", file=sys.stderr)
     except FileNotFoundError:
         print("Warning: git not found — store not committed.", file=sys.stderr)
 
