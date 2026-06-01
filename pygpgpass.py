@@ -301,6 +301,7 @@ def main():
         "  gopass copy <name>\n"
         "  gopass insert <name> [--random]\n"
         "  gopass edit <name>\n"
+        "  gopass cp <src> <dst>\n"
         "  gopass rename <old> <new>\n"
         "  gopass mv <old> <new>\n"
         "  gopass rm <name>\n"
@@ -489,6 +490,30 @@ def main():
         mtime_after = os.path.getmtime(target) if os.path.exists(target) else None
         if mtime_after is not None and mtime_after != mtime_before:
             _git_commit(gpg_store, f"Edit {secret_name}")
+
+    # --- COMMAND: CP ---
+    elif command == "cp":
+        if len(sys.argv) < 4:
+            print("Error: Specify source and destination. (Usage: gopass cp <src> <dst>)", file=sys.stderr)
+            sys.exit(1)
+
+        src_name = sys.argv[2]
+        dst_name = sys.argv[3]
+        src_target = get_target_path(gpg_store, src_name)
+        dst_target = get_target_path(gpg_store, dst_name)
+
+        if not os.path.isfile(src_target):
+            print(f"Error: Password '{src_name}' does not exist.", file=sys.stderr)
+            sys.exit(1)
+
+        if os.path.exists(dst_target):
+            print(f"Error: Password '{dst_name}' already exists.", file=sys.stderr)
+            sys.exit(1)
+
+        os.makedirs(os.path.dirname(dst_target), exist_ok=True)
+        shutil.copy2(src_target, dst_target)
+        print(f"Copied '{src_name}' to '{dst_name}'.")
+        _git_commit(gpg_store, f"Copy {src_name} to {dst_name}")
 
     # --- COMMAND: RENAME / MV ---
     elif command in ("rename", "mv"):

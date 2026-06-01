@@ -75,6 +75,7 @@ gopass show <name> [<line>|<field>]
 gopass copy <name>
 gopass insert <name> [--random]
 gopass edit <name>
+gopass cp <src> <dst>
 gopass rename <old> <new>
 gopass mv <old> <new>
 gopass rm <name>
@@ -173,6 +174,16 @@ Opens an existing secret in your `$EDITOR` for modification. If the secret does 
 
 ```bash
 gopass edit personal/email
+```
+
+### `cp`
+
+Copies a secret to a new path without decrypting — the `.gpg` file is duplicated as-is. Use this when you want a base template to then edit independently.
+
+```bash
+gopass cp work/vpn work/vpn-backup
+# then edit one independently:
+gopass edit work/vpn
 ```
 
 ### `rename` / `mv`
