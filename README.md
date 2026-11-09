@@ -163,7 +163,15 @@ gopass agent ssh/github ~/.ssh/id_ed25519
 # Identity added: /home/you/.ssh/id_ed25519 (you@host)
 ```
 
-Requires a running `ssh-agent` (`SSH_AUTH_SOCK` set) and `ssh-add` from OpenSSH 8.4+ (older versions need `DISPLAY` set). On Windows use Git Bash's `ssh-add`: the helper is a `sh` script.
+If no agent is reachable through `SSH_AUTH_SOCK`, `agent` starts one at `~/.ssh/pygpgpass-agent.sock` (or reuses it if it is already running there). A program can't change its parent shell's environment, so point your shell at that socket once, in `~/.bashrc`:
+
+```bash
+export SSH_AUTH_SOCK="$HOME/.ssh/pygpgpass-agent.sock"
+```
+
+`agent` prints this hint whenever it uses its own agent and your shell isn't pointed at it yet. If your desktop already runs an agent (GNOME Keyring, KDE, `gpg-agent`), that one is used and nothing is started.
+
+Requires `ssh-add` and `ssh-agent` from OpenSSH 8.4+ (older versions need `DISPLAY` set). On Windows use Git Bash's: the helper is a `sh` script.
 
 ### `insert`
 

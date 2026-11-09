@@ -294,6 +294,41 @@ def schedule_clipboard_clear(expected_text, write_cmd, read_cmd):
     except Exception:
         print("Warning: Could not schedule clipboard clear.", file=sys.stderr)
 
+AGENT_SOCKET = "~/.ssh/pygpgpass-agent.sock"
+
+def _agent_reachable(sock):
+    """True if an ssh-agent answers on sock ('ssh-add -l' exits 2 when it can't connect)."""
+    env = dict(os.environ, SSH_AUTH_SOCK=sock)
+    r = subprocess.run(["ssh-add", "-l"], env=env, stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return r.returncode in (0, 1)
+
+def _ensure_ssh_agent():
+    """Make sure an ssh-agent is reachable for this process, setting SSH_AUTH_SOCK.
+    Uses the shell's agent if it answers, otherwise the one at AGENT_SOCKET, starting it if needed.
+    A child process can't change the calling shell's environment, so the agent lives at a fixed
+    path that the shell can point SSH_AUTH_SOCK at. Returns (socket, started) for AGENT_SOCKET,
+    or None when the shell's own agent was used. Raises OSError if ssh-agent can't be started."""
+    current = os.environ.get("SSH_AUTH_SOCK")
+    if current and _agent_reachable(current):
+        return None
+    sock = _expand_path(AGENT_SOCKET)
+    started = False
+    if not _agent_reachable(sock):
+        if os.path.exists(sock):
+            os.remove(sock)  # stale socket left by an agent that has exited
+        os.makedirs(os.path.dirname(sock), mode=0o700, exist_ok=True)
+        # stderr to a file, not a pipe: the daemonised agent could hold a pipe open and hang us
+        with tempfile.TemporaryFile() as err:
+            r = subprocess.run(["ssh-agent", "-a", sock], stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL, stderr=err)
+            if r.returncode != 0:
+                err.seek(0)
+                raise OSError(err.read().decode("utf-8", "replace").strip() or "ssh-agent failed")
+        started = True
+    os.environ["SSH_AUTH_SOCK"] = sock
+    return sock, started
+
 def ssh_add_with_passphrase(key_file, passphrase):
     """Load key_file into ssh-agent, answering ssh-add's passphrase prompt via SSH_ASKPASS.
     The passphrase travels in an environment variable, never on a command line or on disk."""
@@ -983,9 +1018,26 @@ def main():
         if not os.path.isfile(key_file):
             print(f"Error: SSH key file '{sys.argv[3]}' does not exist.", file=sys.stderr)
             sys.exit(1)
-        rc = ssh_add_with_passphrase(key_file, _first_line(decrypt_file(target)))
+        passphrase = _first_line(decrypt_file(target))
+        shell_sock = os.environ.get("SSH_AUTH_SOCK", "")
+        try:
+            own = _ensure_ssh_agent()
+        except FileNotFoundError:
+            print("Error: ssh-add/ssh-agent not found in PATH.", file=sys.stderr)
+            sys.exit(1)
+        except OSError as e:
+            print(f"Error: Could not start ssh-agent: {e}", file=sys.stderr)
+            sys.exit(1)
+        rc = ssh_add_with_passphrase(key_file, passphrase)
         if rc != 0:
-            print(f"Error: ssh-add failed. Is the first line of '{sys.argv[2]}' the key's passphrase, and is ssh-agent running?", file=sys.stderr)
+            print(f"Error: ssh-add failed. Is the first line of '{sys.argv[2]}' the key's passphrase?", file=sys.stderr)
+        elif own:
+            sock, started = own
+            print(f"[{'Started' if started else 'Using'} ssh-agent at {AGENT_SOCKET}]", file=sys.stderr)
+            shell_uses_it = bool(shell_sock) and os.path.normcase(_expand_path(shell_sock)) == os.path.normcase(sock)
+            if not shell_uses_it:
+                print("  Your shell isn't using this agent yet. Add to ~/.bashrc, then open a new shell:\n"
+                      '  export SSH_AUTH_SOCK="$HOME/.ssh/pygpgpass-agent.sock"', file=sys.stderr)
         sys.exit(rc)
 
     # --- COMMAND: INSERT ---
