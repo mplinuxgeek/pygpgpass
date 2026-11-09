@@ -8,6 +8,7 @@ import shutil
 import time
 import configparser
 import re
+import getpass
 
 try:
     import tkinter as tk
@@ -20,6 +21,12 @@ if sys.stdout.encoding != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8')
 if sys.stderr.encoding != 'utf-8':
     sys.stderr.reconfigure(encoding='utf-8')
+
+# --- Windows / Git Bash compatibility ----------------------------------------
+# Linux is the primary platform. Everything here is a no-op elsewhere: it only papers over
+# native Windows Python run from Git Bash, using the MSYS gpg bundled with Git for Windows.
+
+_WINDOWS = sys.platform == "win32"
 
 def _msys_to_windows(path):
     """Convert a Git Bash style path (/c/Users/..., /tmp) to a native Windows path."""
@@ -35,6 +42,34 @@ def _msys_to_windows(path):
         return f"{m.group(1).upper()}:{m.group(2) or '/'}"
     return path
 
+def _fix_gnupghome_for_msys_gpg():
+    """Git Bash hands native programs GNUPGHOME as C:/..., but Git for Windows' gpg is an
+    MSYS build that only treats /c/... as absolute (it would look in <cwd>/C:/...).
+    Convert it back when the gpg on PATH is an MSYS build; native gpg (Gpg4win) needs C:/..."""
+    home = os.environ.get("GNUPGHOME", "")
+    if not _WINDOWS or not re.match(r"^[A-Za-z]:[\\/]", home):
+        return
+    gpg = shutil.which("gpg")
+    if gpg and os.path.exists(os.path.join(os.path.dirname(gpg), "msys-2.0.dll")):
+        os.environ["GNUPGHOME"] = "/" + home[0].lower() + home[2:].replace("\\", "/")
+
+def _utf8_pipes():
+    """On Windows, Python decodes/encodes pipes with the ANSI code page (e.g. cp1252), so
+    'printf ... | pass insert' or 'pass show x | ...' would mangle non-ASCII text. Git Bash
+    pipes carry UTF-8, with LF line endings (a CR would end up in e.g. pw=$(pass show x 1)).
+    Console streams are left alone: Python uses the Unicode console API."""
+    if not _WINDOWS:
+        return
+    if hasattr(sys.stdin, "reconfigure") and not sys.stdin.isatty():
+        sys.stdin.reconfigure(encoding="utf-8")
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure") and not stream.isatty():
+            stream.reconfigure(encoding="utf-8", newline="\n")
+
+_fix_gnupghome_for_msys_gpg()
+
+# -----------------------------------------------------------------------------
+
 def _expand_path(path):
     """Expand ~ and Git Bash style paths to native ones.
     ~ follows $HOME when set, as Git Bash does; Python on Windows would otherwise use
@@ -44,7 +79,7 @@ def _expand_path(path):
         path = home + path[1:]
     else:
         path = os.path.expanduser(path)
-    if sys.platform == "win32" and path.startswith("/"):
+    if _WINDOWS and path.startswith("/"):
         path = _msys_to_windows(path)
     return os.path.normpath(path)
 
@@ -131,7 +166,7 @@ def _use_console_pinentry():
     value = _read_config().get("pygpgpass", "console_pinentry", fallback="").strip().lower()
     if value:
         return value in ("1", "true", "yes", "on")
-    return sys.platform == "win32"
+    return _WINDOWS
 
 class DecryptError(Exception):
     pass
@@ -144,7 +179,6 @@ def _gpg_error(stderr):
     return (reasons or lines or [""])[-1]
 
 def _console_passphrase(retry):
-    import getpass
     if retry:
         print("Bad passphrase, try again.", file=sys.stderr)
     try:
@@ -157,20 +191,27 @@ def _decrypt_loopback(file_path, ask_passphrase):
     """Decrypt via loopback pinentry: try the agent's cached passphrase first,
     then ask_passphrase(retry) (None gives up). The agent caches whatever passphrase works."""
     base = ["gpg", "--quiet", "--batch", "--pinentry-mode", "loopback", "--status-fd", "2"]
-    result = subprocess.run(base + ["--decrypt", file_path],
-                            stdin=subprocess.DEVNULL, capture_output=True, text=True)
-    if result.returncode == 0:
-        return result.stdout
-    if "[GNUPG:] NEED_PASSPHRASE" in result.stderr:  # otherwise a passphrase won't help
+    # Bytes, not text: on Windows text mode would turn "\n" into "\r\n" and use the
+    # ANSI code page, either of which corrupts the passphrase gpg receives.
+    def run(*args, passphrase=None):
+        r = subprocess.run(base + list(args), capture_output=True,
+                           input=None if passphrase is None else (passphrase + "\n").encode("utf-8"),
+                           stdin=subprocess.DEVNULL if passphrase is None else None)
+        return r.returncode, r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace")
+
+    returncode, stdout, stderr = run("--decrypt", file_path)
+    if returncode == 0:
+        return stdout
+    if "[GNUPG:] NEED_PASSPHRASE" in stderr:  # otherwise a passphrase won't help
         for attempt in range(3):
             passphrase = ask_passphrase(attempt > 0)
             if passphrase is None:
                 break
-            result = subprocess.run(base + ["--passphrase-fd", "0", "--decrypt", file_path],
-                                    input=passphrase + "\n", capture_output=True, text=True)
-            if result.returncode == 0:
-                return result.stdout
-    reason = _gpg_error(result.stderr)
+            returncode, stdout, stderr = run("--passphrase-fd", "0", "--decrypt", file_path,
+                                             passphrase=passphrase)
+            if returncode == 0:
+                return stdout
+    reason = _gpg_error(stderr)
     raise DecryptError(f"Failed to decrypt {file_path}." + (f" ({reason})" if reason else ""))
 
 def decrypt_file(file_path):
@@ -186,13 +227,13 @@ def decrypt_file(file_path):
             ["gpg", "--quiet", "--decrypt", file_path],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
             check=True
         )
-        return result.stdout
+        # Bytes, not text mode: on Windows text mode would decode with the ANSI code page.
+        return result.stdout.decode("utf-8", "replace")
     except subprocess.CalledProcessError as e:
         print(f"Error: Failed to decrypt {file_path}. Is your GPG key unlocked?", file=sys.stderr)
-        reason = _gpg_error(e.stderr)
+        reason = _gpg_error(e.stderr.decode("utf-8", "replace"))
         if reason:
             print(f"  {reason}", file=sys.stderr)
         sys.exit(1)
@@ -201,7 +242,7 @@ CLIPBOARD_CLEAR_SECONDS = 90
 
 def _clipboard_cmds():
     """Returns (write_cmd, read_cmd) for the current platform, or (None, None) if unsupported."""
-    if sys.platform == "win32":
+    if _WINDOWS:
         return ["clip.exe"], ["powershell.exe", "-command", "Get-Clipboard"]
     if sys.platform == "darwin":
         return ["pbcopy"], ["pbpaste"]
@@ -244,7 +285,7 @@ def schedule_clipboard_clear(expected_text, write_cmd, read_cmd):
         "r.stdout.strip()==expected and subprocess.run(write_cmd,input='',text=True)"
     )
     kwargs = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
-    if sys.platform == "win32":
+    if _WINDOWS:
         kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         kwargs["start_new_session"] = True
@@ -287,8 +328,9 @@ def _encrypt(text_content, target_path):
     try:
         subprocess.run(
             ["gpg", "--quiet", "--yes", "--encrypt", "--default-recipient-self", "--output", tmp_path],
-            input=text_content,
-            text=True,
+            # Bytes, not text mode: on Windows text mode would store CRLF line endings
+            # and ANSI code page text instead of UTF-8.
+            input=text_content.encode("utf-8"),
             check=True
         )
         os.replace(tmp_path, target_path)
@@ -308,7 +350,6 @@ def encrypt_text(text_content, target_path):
 
 def _read_password():
     """Hidden password entry with confirmation. Returns "" if left blank."""
-    import getpass
     if not sys.stdin.isatty():  # piped input: no echo to hide
         return sys.stdin.readline().rstrip("\r\n")
     while True:
@@ -802,6 +843,7 @@ def _prune_empty_dirs(path, gpg_store):
         path = os.path.dirname(path)
 
 def main():
+    _utf8_pipes()
     usage = (
         "Usage:\n"
         "  gopass init [--force]\n"

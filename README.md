@@ -2,7 +2,7 @@
 
 A minimal, zero-dependency, pure Python alternative to `gopass` and `pass`.
 
-Built for locked-down or restricted environments (corporate Windows machines without admin rights, WSL, or any system where only Python and Git Bash are available). Interacts directly with the GPG binary already bundled with Git for Windows — no pip, no virtualenv, no admin.
+Linux first: it needs only Python 3 and `gpg`, both already on most distributions, and talks to `gpg` directly — no pip, no virtualenv, no root. The same script also runs on locked-down Windows machines from Git Bash, using the `gpg` bundled with Git for Windows (see [Windows (Git Bash)](#windows-git-bash)).
 
 ---
 
@@ -10,7 +10,7 @@ Built for locked-down or restricted environments (corporate Windows machines wit
 
 - **Full command set:** `init`, `list`, `find`, `show`, `copy`, `agent`, `insert`, `edit`, `cp`, `rename`/`mv`, `rm`, `git`, `sync`, `gui`
 - **ASCII tree view:** Recursively lists secrets, hiding empty directories and non-password files
-- **Cross-platform clipboard:** Supports `clip.exe` (Windows), `pbcopy` (macOS), `wl-copy` (Wayland), `xclip`, and `xsel` (X11) — auto-detected
+- **Clipboard:** `wl-copy` (Wayland), `xclip` or `xsel` (X11), auto-detected; also `pbcopy` (macOS) and `clip.exe` (Windows)
 - **Clipboard auto-clear:** Copied password is cleared after 90 seconds, only if the clipboard hasn't changed
 - **Pronounceable password generator:** Cryptographically secure via Python's `secrets` module
 - **Atomic writes:** Encryption uses a temp file + atomic rename — a failed write never corrupts an existing secret
@@ -21,12 +21,10 @@ Built for locked-down or restricted environments (corporate Windows machines wit
 
 ## Prerequisites
 
-1. **Python 3.6+**
-2. **Git for Windows** (provides Git Bash and the bundled `gpg` binary)
+1. **Python 3.7+**
+2. **GnuPG 2.1+** (`gpg`) and **git** — packaged on every major distribution
 3. A GPG key pair — run `gpg --gen-key` if you don't have one
-
-> [!TIP]
-> For the best experience on Windows, run Git Bash inside **Windows Terminal** rather than the legacy `mintty` console.
+4. Optional: a clipboard tool for `copy` (see [Clipboard tool detection](#clipboard-tool-detection-linux)), and tkinter for `gui`
 
 ---
 
@@ -37,7 +35,6 @@ Built for locked-down or restricted environments (corporate Windows machines wit
 Save `pygpgpass.py` to your home directory:
 
 ```bash
-# inside Git Bash
 cp pygpgpass.py ~/pygpgpass.py
 ```
 
@@ -166,7 +163,7 @@ gopass agent ssh/github ~/.ssh/id_ed25519
 # Identity added: /home/you/.ssh/id_ed25519 (you@host)
 ```
 
-Requires a running `ssh-agent` (`SSH_AUTH_SOCK` set) and `ssh-add` from OpenSSH. On Windows use Git Bash's `ssh-add`, not the native `C:\Windows\System32\OpenSSH` one: the helper is a `sh` script.
+Requires a running `ssh-agent` (`SSH_AUTH_SOCK` set) and `ssh-add` from OpenSSH 8.4+ (older versions need `DISPLAY` set). On Windows use Git Bash's `ssh-add`: the helper is a `sh` script.
 
 ### `insert`
 
@@ -253,7 +250,25 @@ Opens a small desktop window (tkinter, part of the Python standard library):
 gopass gui
 ```
 
-On Linux, tkinter may need installing: `sudo dnf install python3-tkinter` (Fedora) or `sudo apt install python3-tk` (Debian/Ubuntu). It is included with the python.org Windows installer.
+tkinter may need installing: `sudo dnf install python3-tkinter` (Fedora) or `sudo apt install python3-tk` (Debian/Ubuntu).
+
+---
+
+## Windows (Git Bash)
+
+Windows is supported as a fallback for machines where Linux tools aren't allowed. Requirements:
+
+- **Git for Windows** — provides Git Bash plus the `gpg`, `ssh-add` and `ssh-agent` used by the script
+- **Python 3** for Windows (the python.org installer includes tkinter)
+- Run it from Git Bash, ideally inside **Windows Terminal** rather than the legacy `mintty` console
+
+Windows-specific behaviour, all handled automatically:
+
+- The GPG passphrase is asked for in the terminal rather than in a graphical pinentry window (see [Passphrase prompt](#passphrase-prompt))
+- `~` and Git Bash paths such as `/c/Users/you/gpg` are converted to native Windows paths
+- `GNUPGHOME`, if set, is converted back to the `/c/...` form that Git's `gpg` expects
+- Piped input and output use UTF-8 and `\n` line endings, as on Linux, so `pw=$(gopass show x 1)` works
+- `copy` uses `clip.exe`; `agent` needs Git Bash's `ssh-add`, not `C:\Windows\System32\OpenSSH\ssh-add.exe`
 
 ---
 
@@ -302,9 +317,11 @@ url: https://example.com
 
 ## Passphrase prompt
 
-On Windows the GPG passphrase is asked for in the terminal (`GPG passphrase:`) instead of gpg's graphical pinentry window. The passphrase is handed to gpg via loopback pinentry and cached by `gpg-agent` as usual, so you are only asked again once the agent cache expires.
+On Linux, decryption uses gpg's own pinentry (curses or GTK/Qt, as configured in `gpg-agent.conf`), like `pass` and `gopass`.
 
-Override the platform default in `~/.pygpgpassrc`:
+On Windows the passphrase is asked for in the terminal (`GPG passphrase:`) instead, because Git's bundled pinentry is a graphical window. The passphrase is handed to gpg via loopback pinentry and cached by `gpg-agent` as usual, so you are only asked again once the agent cache expires.
+
+Override the platform default in `~/.pygpgpassrc`, e.g. to get the terminal prompt on Linux too (handy over SSH):
 
 ```ini
 [pygpgpass]
@@ -348,5 +365,4 @@ sudo apt install xclip          # X11
 
 ## Limitations
 
-- Outside Windows (unless `console_pinentry = true`), passphrase entry is left to gpg's own pinentry
 - On Windows, same-user processes can read environment variables of other processes — this affects the clipboard cleaner's 90-second window
