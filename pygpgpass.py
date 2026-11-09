@@ -7,6 +7,7 @@ import secrets
 import shutil
 import time
 import configparser
+import re
 
 try:
     import tkinter as tk
@@ -20,7 +21,41 @@ if sys.stdout.encoding != 'utf-8':
 if sys.stderr.encoding != 'utf-8':
     sys.stderr.reconfigure(encoding='utf-8')
 
-CONFIG_FILE     = os.path.expanduser("~/.pygpgpassrc")
+def _msys_to_windows(path):
+    """Convert a Git Bash style path (/c/Users/..., /tmp) to a native Windows path."""
+    if shutil.which("cygpath"):
+        try:
+            r = subprocess.run(["cygpath", "-w", path], capture_output=True, text=True)
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip()
+        except OSError:
+            pass
+    m = re.match(r"^/([a-zA-Z])(/.*)?$", path)
+    if m:
+        return f"{m.group(1).upper()}:{m.group(2) or '/'}"
+    return path
+
+def _expand_path(path):
+    """Expand ~ and Git Bash style paths to native ones.
+    ~ follows $HOME when set, as Git Bash does; Python on Windows would otherwise use
+    %USERPROFILE%, which differs from Git Bash's home on many corporate machines."""
+    home = os.environ.get("HOME")
+    if home and (path == "~" or path.startswith(("~/", "~\\"))):
+        path = home + path[1:]
+    else:
+        path = os.path.expanduser(path)
+    if sys.platform == "win32" and path.startswith("/"):
+        path = _msys_to_windows(path)
+    return os.path.normpath(path)
+
+def _config_file():
+    path = _expand_path("~/.pygpgpassrc")
+    legacy = os.path.expanduser("~/.pygpgpassrc")  # where older versions looked on Windows
+    if not os.path.exists(path) and os.path.exists(legacy):
+        return legacy
+    return path
+
+CONFIG_FILE     = _config_file()
 SYNC_INTERVAL_H = 12
 
 def _read_config():
@@ -31,7 +66,7 @@ def _read_config():
 def load_gpg_store_path():
     path = _read_config().get("pygpgpass", "store", fallback="").strip()
     if path:
-        return os.path.normpath(os.path.expanduser(path))
+        return _expand_path(path)
     return None
 
 def generate_pronounceable_password(length=15, digit_length=3):
@@ -101,6 +136,13 @@ def _use_console_pinentry():
 class DecryptError(Exception):
     pass
 
+def _gpg_error(stderr):
+    """gpg's own reason for a failure (last 'gpg:' line, status lines skipped), or ''."""
+    lines = [l.strip() for l in stderr.splitlines()
+             if l.strip() and not l.startswith("[GNUPG:]")]
+    reasons = [l for l in lines if l.startswith("gpg:")]
+    return (reasons or lines or [""])[-1]
+
 def _console_passphrase(retry):
     import getpass
     if retry:
@@ -128,7 +170,8 @@ def _decrypt_loopback(file_path, ask_passphrase):
                                     input=passphrase + "\n", capture_output=True, text=True)
             if result.returncode == 0:
                 return result.stdout
-    raise DecryptError(f"Failed to decrypt {file_path}.")
+    reason = _gpg_error(result.stderr)
+    raise DecryptError(f"Failed to decrypt {file_path}." + (f" ({reason})" if reason else ""))
 
 def decrypt_file(file_path):
     """Invoke gpg to decrypt the file silently and return the text."""
@@ -142,13 +185,16 @@ def decrypt_file(file_path):
         result = subprocess.run(
             ["gpg", "--quiet", "--decrypt", file_path],
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             text=True,
             check=True
         )
         return result.stdout
-    except subprocess.CalledProcessError:
+    except subprocess.CalledProcessError as e:
         print(f"Error: Failed to decrypt {file_path}. Is your GPG key unlocked?", file=sys.stderr)
+        reason = _gpg_error(e.stderr)
+        if reason:
+            print(f"  {reason}", file=sys.stderr)
         sys.exit(1)
 
 CLIPBOARD_CLEAR_SECONDS = 90
@@ -800,9 +846,9 @@ def main():
         if not user_path:
             user_path = default_path
         if not user_path.startswith("~"):
-            user_path = os.path.abspath(user_path)  # a relative path would resolve against each command's cwd
+            user_path = os.path.abspath(_expand_path(user_path))  # a relative path would resolve against each command's cwd
 
-        resolved_path = os.path.expanduser(user_path)
+        resolved_path = _expand_path(user_path)
         os.makedirs(resolved_path, exist_ok=True)
 
         config = _read_config()  # --force keeps any other settings
@@ -891,7 +937,7 @@ def main():
     elif command == "agent":
         _require_args(2, "gopass agent <name> <keyfile>")
         target = _existing_secret(gpg_store, sys.argv[2])
-        key_file = os.path.expanduser(sys.argv[3])
+        key_file = _expand_path(sys.argv[3])
         if not os.path.isfile(key_file):
             print(f"Error: SSH key file '{sys.argv[3]}' does not exist.", file=sys.stderr)
             sys.exit(1)
