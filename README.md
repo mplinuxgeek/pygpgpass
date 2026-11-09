@@ -8,13 +8,13 @@ Built for locked-down or restricted environments (corporate Windows machines wit
 
 ## Features
 
-- **Full command set:** `init`, `list`, `find`, `show`, `copy`, `insert`, `edit`, `rename`/`mv`, `rm`, `git`, `sync`
+- **Full command set:** `init`, `list`, `find`, `show`, `copy`, `agent`, `insert`, `edit`, `cp`, `rename`/`mv`, `rm`, `git`, `sync`, `gui`
 - **ASCII tree view:** Recursively lists secrets, hiding empty directories and non-password files
 - **Cross-platform clipboard:** Supports `clip.exe` (Windows), `pbcopy` (macOS), `wl-copy` (Wayland), `xclip`, and `xsel` (X11) — auto-detected
 - **Clipboard auto-clear:** Copied password is cleared after 90 seconds, only if the clipboard hasn't changed
-- **Pronounceable password generator:** Cryptographically secure via Python's `secrets` module; opens in editor for review before saving
+- **Pronounceable password generator:** Cryptographically secure via Python's `secrets` module
 - **Atomic writes:** Encryption uses a temp file + atomic rename — a failed write never corrupts an existing secret
-- **Secure temp files:** Editor temp files are written to RAM (`/dev/shm`) on Linux where available, zero-wiped before deletion
+- **No plaintext on disk:** Secrets are typed straight into the terminal (password input hidden) and piped to `gpg` — no editor, no temp files
 - **Path safety:** Secret names are bounds-checked against the store root — no directory traversal
 
 ---
@@ -73,6 +73,7 @@ gopass list
 gopass find <term>
 gopass show <name> [<line>|<field>]
 gopass copy <name>
+gopass agent <name> <keyfile>
 gopass insert <name> [--random]
 gopass edit <name>
 gopass cp <src> <dst>
@@ -81,6 +82,8 @@ gopass mv <old> <new>
 gopass rm <name>
 gopass git <subcommand>
 gopass sync
+gopass gui
+gopass help
 ```
 
 ### `init`
@@ -154,15 +157,26 @@ gopass copy work/vpn
 # [Copied 'work/vpn' to clipboard — clears in 90s]
 ```
 
+### `agent`
+
+Decrypts a secret and uses its **first non-blank line** as the passphrase to load an SSH private key into the running `ssh-agent` (`ssh-add`). The passphrase is supplied through a one-shot `SSH_ASKPASS` helper via an environment variable — it never appears on a command line, on disk, or in the clipboard.
+
+```bash
+gopass agent ssh/github ~/.ssh/id_ed25519
+# Identity added: /home/you/.ssh/id_ed25519 (you@host)
+```
+
+Requires a running `ssh-agent` (`SSH_AUTH_SOCK` set) and `ssh-add` from OpenSSH. On Windows use Git Bash's `ssh-add`, not the native `C:\Windows\System32\OpenSSH` one: the helper is a `sh` script.
+
 ### `insert`
 
-Stores a new secret. Type your content line by line, then type `SAVE` on its own line to encrypt and save.
+Stores a new secret. Enter the password (hidden, asked twice to confirm), then any extra lines such as `user: bob`, then type `SAVE` on its own line to encrypt and save.
 
 ```bash
 gopass insert personal/email
 ```
 
-Use `--random` to generate a cryptographically secure, pronounceable 15-character password and review it in your editor before saving:
+Use `--random` to generate a cryptographically secure, pronounceable 15-character password instead of typing one. You are still asked for extra lines; the password is not printed (use `copy` or `show`):
 
 ```bash
 gopass insert personal/email --random
@@ -170,7 +184,7 @@ gopass insert personal/email --random
 
 ### `edit`
 
-Opens an existing secret in your `$EDITOR` for modification. If the secret does not exist it is created. Changes are encrypted on save; no changes aborts without writing.
+Replaces an existing secret: same prompts as `insert`, and what you type becomes the whole secret, so re-enter any fields you want to keep. Leave the password blank to cancel without changes. Use `insert` to create a new secret.
 
 ```bash
 gopass edit personal/email
@@ -225,6 +239,22 @@ Pulls remote changes (with rebase) then pushes local commits. Use this to sync b
 gopass sync
 ```
 
+### `gui`
+
+Opens a small desktop window (tkinter, part of the Python standard library):
+
+- Search box (Ctrl+F) filters the secret tree as you type
+- Selecting a secret decrypts it with the password line masked — **Show** reveals it, **Copy password** copies it (cleared after 90 seconds, same as `copy`)
+- **New…** asks for a name and opens an in-window editor pre-filled with a generated password; **Generate password** replaces the password line while editing
+- **Edit** / **Delete** work like the CLI commands, including the git commit and push
+- If your GPG key is locked, the passphrase is asked for in a dialog
+
+```bash
+gopass gui
+```
+
+On Linux, tkinter may need installing: `sudo dnf install python3-tkinter` (Fedora) or `sudo apt install python3-tk` (Debian/Ubuntu). It is included with the python.org Windows installer.
+
 ---
 
 ## Git setup (first time)
@@ -270,15 +300,18 @@ url: https://example.com
 
 ---
 
-## Editor configuration
+## Passphrase prompt
 
-Set the `EDITOR` environment variable to control which editor opens for `insert --random` and `edit`. Arguments are supported:
+On Windows the GPG passphrase is asked for in the terminal (`GPG passphrase:`) instead of gpg's graphical pinentry window. The passphrase is handed to gpg via loopback pinentry and cached by `gpg-agent` as usual, so you are only asked again once the agent cache expires.
 
-```bash
-export EDITOR="vim"
-export EDITOR="code --wait"
-export EDITOR="nano"
+Override the platform default in `~/.pygpgpassrc`:
+
+```ini
+[pygpgpass]
+console_pinentry = true    # or false to use gpg's own pinentry
 ```
+
+Requires `allow-loopback-pinentry` in `gpg-agent.conf`, which is on by default since GnuPG 2.1.12.
 
 ---
 
@@ -306,7 +339,7 @@ sudo apt install xclip          # X11
 
 - All secrets are encrypted with your default GPG key (`--default-recipient-self`)
 - Encryption always writes to a temporary file first; the original is only replaced on success — a failed or interrupted write never corrupts existing data
-- Editor temp files are created in `/dev/shm` (RAM-backed) on Linux where available, so plaintext does not touch disk; they are zero-wiped before deletion regardless
+- `insert` and `edit` read secrets from the terminal and pipe them to `gpg`, so plaintext is never written to a file (the GUI edits in memory too)
 - Clipboard clear scheduling passes the expected clipboard value via environment variable, not command-line arguments — command-line arguments are world-readable in `/proc/PID/cmdline` on Linux; environment variables are owner-only via `/proc/PID/environ`
 - `~/.pygpgpassrc` is created with mode `600`
 - Secret names are validated to prevent directory traversal outside the store root
@@ -315,7 +348,5 @@ sudo apt install xclip          # X11
 
 ## Limitations
 
-- No GPG agent integration — your key must be unlocked before running commands (or your agent must be running)
-- Clipboard clear does not survive if `python3` is not in `PATH` when the background cleaner spawns
+- Outside Windows (unless `console_pinentry = true`), passphrase entry is left to gpg's own pinentry
 - On Windows, same-user processes can read environment variables of other processes — this affects the clipboard cleaner's 90-second window
-- Temp file zero-wipe is best-effort; SSDs with wear leveling and filesystem journaling may retain data in sectors Python cannot control
